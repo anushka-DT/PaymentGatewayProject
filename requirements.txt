@@ -1,0 +1,4 @@
+SQLAlchemy
+pytest
+pytest-cov
+requests
