@@ -1,5 +1,5 @@
 def generate_payment_report():
-    print("Payment report generated successfully.")
+    print("Transaction completed.")
 
 
 if __name__ == "__main__":
