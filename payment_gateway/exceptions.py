@@ -12,3 +12,7 @@ class PaymentFailedError(PaymentError):
 
 class GatewayUnavailableError(PaymentError):
     pass
+
+
+class InvalidPaymentAmountError(PaymentError):
+    """Raised when the payment amount is invalid."""
