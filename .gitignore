@@ -1,0 +1,17 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# IDE settings
+.idea/
+
+# Application logs
+logs/
+
+# Testing and linting cache
+.pytest_cache/
+.ruff_cache/
