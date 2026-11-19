@@ -1,4 +1,1 @@
-SQLAlchemy
-pytest
-pytest-cov
-requests
+SQLAlchemy==2.1.9
