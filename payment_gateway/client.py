@@ -1,10 +1,9 @@
-
-from decimal import Decimal
-
 from payment_gateway.audit_logger import log_payment
 from payment_gateway.exceptions import (
+    AllGatewaysFailedError,
     GatewayUnavailableError,
     PaymentError,
+    PaymentFailedError,
     PaymentTimeoutError,
 )
 from payment_gateway.models import PaymentResponse
@@ -14,144 +13,175 @@ from payment_gateway.retry import retry
 class PaymentGatewayClient:
     """Process payments using primary and fallback gateways."""
 
-    def __init__(self, gateways, payment_repository=None):
+    def __init__(
+        self,
+        gateways,
+        payment_repository=None,
+        *,
+        retry_attempts=3,
+        retry_initial_delay=1,
+        retry_backoff_factor=2,
+        retry_jitter=0.2,
+    ):
         self.gateways = gateways
         self.payment_repository = payment_repository
 
-    def _validate_payment(self, payment):
-        """Check payment details before processing."""
+        self._process_with_retry = retry(
+            attempts=retry_attempts,
+            initial_delay=retry_initial_delay,
+            backoff_factor=retry_backoff_factor,
+            jitter=retry_jitter,
+        )(self._process_with_retry)
 
-        if not isinstance(payment.payment_id, str) or not payment.payment_id.strip():
-            raise PaymentError("Payment ID is required")
+    def _process_payment(self, gateway, payment):
+        """Process payment and validate the gateway response."""
 
-        if len(payment.payment_id) > 50:
-            raise PaymentError("Payment ID cannot exceed 50 characters")
+        result = gateway.process_payment(payment)
 
-        if not isinstance(payment.amount, Decimal):
-            raise PaymentError("Payment amount must be a Decimal value")
+        if not isinstance(result, PaymentResponse):
+            raise PaymentError("Gateway returned an invalid payment response")
 
-        if not payment.amount.is_finite() or payment.amount <= 0:
-            raise PaymentError("Payment amount must be greater than zero")
+        if result.payment_id != payment.payment_id:
+            raise PaymentError("Gateway returned a response for a different payment")
 
-        if payment.amount.as_tuple().exponent < -2:
-            raise PaymentError(
-                "Payment amount cannot have more than 2 decimal places"
-            )
+        if result.status not in ("SUCCESS", "FAILED"):
+            raise PaymentError("Gateway returned an invalid payment status")
 
-        if payment.amount > Decimal("99999999.99"):
-            raise PaymentError(
-                "Payment amount cannot exceed 99999999.99"
-            )
+        if result.status == "FAILED":
+            raise PaymentFailedError(result.message)
 
-        if (
-            not isinstance(payment.currency, str)
-            or len(payment.currency) != 3
-            or not payment.currency.isascii()
-            or not payment.currency.isalpha()
-            or not payment.currency.isupper()
-        ):
-            raise PaymentError("Currency must be a 3-letter uppercase code")
+        return result
 
-        if not isinstance(payment.gateway, str) or not payment.gateway.strip():
-            raise PaymentError("Payment gateway is required")
+    def _process_with_retry(self, gateway, payment):
+        """Process a payment with retry enabled."""
 
-    def _save_payment(self, payment, status, message, gateway_name):
-        """Save payment details if database integration is enabled."""
+        return self._process_payment(gateway, payment)
+
+    def _update_payment(self, payment, status, message, gateway_name):
+        """Update the database record if database integration is enabled."""
 
         if self.payment_repository is not None:
-            self.payment_repository.save_payment(
-                payment,
+            updated = self.payment_repository.update_status(
+                payment.payment_id,
                 status,
                 message,
                 gateway_name,
             )
 
-    @retry
-    def _process_payment(self, gateway, payment):
-        """Process payment and verify the gateway response."""
-
-        result = gateway.process_payment(payment)
-
-        if not isinstance(result, PaymentResponse):
-            raise PaymentError(
-                "Gateway returned an invalid payment response"
-            )
-
-        if result.payment_id != payment.payment_id:
-            raise PaymentError(
-                "Gateway returned a response for a different payment"
-            )
-
-        return result
+            if not updated:
+                raise PaymentError(f"Payment record not found: {payment.payment_id}")
 
     def process_payment(self, payment):
-        """Process payment with fallback if the primary gateway fails."""
+        """Process payment through primary and fallback gateways."""
 
-        self._validate_payment(payment)
+        payment.validate()
 
-        primary_gateway = self.gateways.get(payment.gateway)
+        primary_gateway_name = payment.gateway
+        primary_gateway = self.gateways.get(primary_gateway_name)
 
         if primary_gateway is None:
             raise PaymentError("Invalid payment gateway")
 
-        last_error = None
-        last_gateway_name = payment.gateway
+        if self.payment_repository is not None:
+            self.payment_repository.create_pending_payment(payment)
+
+        ordered_gateways = [
+            (primary_gateway_name, primary_gateway),
+            *(
+                (name, gateway)
+                for name, gateway in self.gateways.items()
+                if name != primary_gateway_name
+            ),
+        ]
+
+        failures = []
+        current_gateway_name = primary_gateway_name
 
         try:
-            log_payment(f"Starting payment through {payment.gateway}")
-
-            result = self._process_payment(primary_gateway, payment)
-
-            log_payment(result.message)
-
-            self._save_payment(
-                payment,
-                result.status,
-                result.message,
-                payment.gateway,
-            )
-
-            return result
-
-        except (PaymentTimeoutError, GatewayUnavailableError) as error:
-            last_error = error
             log_payment(
-                f"{payment.gateway} failed after retries. Switching gateway."
+                "Starting payment",
+                payment_id=payment.payment_id,
+                gateway=primary_gateway_name,
             )
 
-        for gateway_name, gateway in self.gateways.items():
-            if gateway_name == payment.gateway:
-                continue
+            for index, (gateway_name, gateway) in enumerate(ordered_gateways):
+                current_gateway_name = gateway_name
 
-            last_gateway_name = gateway_name
+                if index > 0:
+                    log_payment(
+                        "Switching to fallback gateway",
+                        payment_id=payment.payment_id,
+                        gateway=gateway_name,
+                    )
 
-            try:
-                log_payment(f"Switching to {gateway_name}")
+                attempt_callback = None
 
-                result = self._process_payment(gateway, payment)
+                if self.payment_repository is not None:
 
-                log_payment(result.message)
+                    def attempt_callback(
+                        attempt_number,
+                        status,
+                        message,
+                        current_gateway=gateway_name,
+                    ):
+                        self.payment_repository.create_attempt(
+                            payment.payment_id,
+                            current_gateway,
+                            attempt_number,
+                            status,
+                            message,
+                        )
 
-                self._save_payment(
-                    payment,
-                    result.status,
-                    result.message,
-                    gateway_name,
-                )
+                try:
+                    result = self._process_with_retry(
+                        gateway,
+                        payment,
+                        _payment_id=payment.payment_id,
+                        _gateway_name=gateway_name,
+                        _attempt_callback=attempt_callback,
+                    )
 
-                return result
+                    self._update_payment(
+                        payment,
+                        "SUCCESS",
+                        result.message,
+                        gateway_name,
+                    )
 
-            except (PaymentTimeoutError, GatewayUnavailableError) as error:
-                last_error = error
-                log_payment(f"{gateway_name} failed after retries")
+                    log_payment(
+                        result.message,
+                        payment_id=payment.payment_id,
+                        gateway=gateway_name,
+                    )
 
-        log_payment("Payment failed on all available gateways")
+                    return result
 
-        self._save_payment(
-            payment,
-            "FAILED",
-            str(last_error),
-            last_gateway_name,
-        )
+                except (
+                    PaymentTimeoutError,
+                    GatewayUnavailableError,
+                ) as error:
+                    failures.append((gateway_name, error))
 
-        raise last_error
+                    log_payment(
+                        f"Gateway failed after retries: {error}",
+                        payment_id=payment.payment_id,
+                        gateway=gateway_name,
+                    )
+
+            raise AllGatewaysFailedError(failures)
+
+        except PaymentError as error:
+            self._update_payment(
+                payment,
+                "FAILED",
+                str(error),
+                current_gateway_name,
+            )
+
+            log_payment(
+                f"Payment failed: {error}",
+                payment_id=payment.payment_id,
+                gateway=current_gateway_name,
+            )
+
+            raise
