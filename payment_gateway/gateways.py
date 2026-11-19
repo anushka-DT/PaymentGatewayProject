@@ -1,27 +1,41 @@
 from abc import ABC, abstractmethod
 
+from payment_gateway.audit_logger import log_payment
 from payment_gateway.exceptions import PaymentTimeoutError
 from payment_gateway.models import Payment, PaymentResponse
 
 
 class PaymentGateway(ABC):
+    """Base class for payment gateways."""
+
     @abstractmethod
     def process_payment(self, payment: Payment) -> PaymentResponse:
-        pass
+        """Process a payment through a gateway."""
 
 
 class GatewayA(PaymentGateway):
-    def __init__(self, fail_attempts=0):
-        self.attempts = 0
+    """Primary payment gateway."""
+
+    def __init__(self, fail_attempts: int = 0):
         self.fail_attempts = fail_attempts
+        self.attempts = 0
 
     def process_payment(self, payment: Payment) -> PaymentResponse:
-
         self.attempts += 1
-        print(f"Gateway A - Attempt {self.attempts}")
 
         if self.attempts <= self.fail_attempts:
+            log_payment(
+                "Gateway A timed out",
+                payment_id=payment.payment_id,
+                gateway="gateway_a",
+            )
             raise PaymentTimeoutError("Gateway A timed out")
+
+        log_payment(
+            "Payment processed through Gateway A",
+            payment_id=payment.payment_id,
+            gateway="gateway_a",
+        )
 
         return PaymentResponse(
             payment_id=payment.payment_id,
@@ -31,9 +45,14 @@ class GatewayA(PaymentGateway):
 
 
 class GatewayB(PaymentGateway):
-    def process_payment(self, payment: Payment) -> PaymentResponse:
+    """Fallback payment gateway."""
 
-        print("Gateway B - Processing payment")
+    def process_payment(self, payment: Payment) -> PaymentResponse:
+        log_payment(
+            "Payment processed through Gateway B",
+            payment_id=payment.payment_id,
+            gateway="gateway_b",
+        )
 
         return PaymentResponse(
             payment_id=payment.payment_id,
