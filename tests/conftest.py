@@ -1,29 +1,24 @@
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from payment_gateway.database.connection import create_database
 from payment_gateway.database.db_models import Base
 from payment_gateway.database.repository import PaymentRepository
 
 
 @pytest.fixture
 def session_factory():
-    """Create an in-memory SQLite database for testing."""
+    """Create an isolated in-memory SQLite database for testing."""
 
-    engine = create_engine(
+    engine, test_session_factory = create_database(
         "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+        engine_options={
+            "connect_args": {"check_same_thread": False},
+            "poolclass": StaticPool,
+        },
     )
 
     Base.metadata.create_all(engine)
-
-    test_session_factory = sessionmaker(
-        bind=engine,
-        autoflush=False,
-        expire_on_commit=False,
-    )
 
     yield test_session_factory
 

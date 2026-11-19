@@ -1,4 +1,12 @@
-from payment_gateway.database.db_models import PaymentRecord
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+
+from payment_gateway.database.db_models import (
+    PaymentAttemptRecord,
+    PaymentRecord,
+)
+from payment_gateway.exceptions import DuplicatePaymentError
+
 
 class PaymentRepository:
     """Handles database operations for payment records."""
@@ -6,32 +14,72 @@ class PaymentRepository:
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
-    def save_payment(self, payment, status, message, gateway_name=None):
-        """Save a new payment or update an existing payment."""
+    def create_pending_payment(self, payment):
+        """Create a pending record before gateway processing."""
 
-        with self.session_factory.begin() as session:
-            record = session.get(PaymentRecord, payment.payment_id)
+        try:
+            with self.session_factory.begin() as session:
+                existing = session.get(
+                    PaymentRecord,
+                    payment.payment_id,
+                )
 
-            if record is None:
+                if existing is not None:
+                    raise DuplicatePaymentError(
+                        f"Payment ID already exists: {payment.payment_id}"
+                    )
+
                 record = PaymentRecord(
                     payment_id=payment.payment_id,
                     amount=payment.amount,
                     currency=payment.currency,
-                    gateway=gateway_name or payment.gateway,
-                    status=status,
-                    message=message,
+                    gateway=payment.gateway,
+                    status="PENDING",
+                    message="Payment processing started",
                 )
 
                 session.add(record)
 
-            else:
-                record.amount = payment.amount
-                record.currency = payment.currency
-                record.gateway = gateway_name or payment.gateway
-                record.status = status
-                record.message = message
+        except IntegrityError as error:
+            if self.get_payment(payment.payment_id) is not None:
+                raise DuplicatePaymentError(
+                    f"Payment ID already exists: {payment.payment_id}"
+                ) from error
 
-            return record
+            raise
+
+    def create_attempt(
+        self,
+        payment_id,
+        gateway,
+        attempt_number,
+        status,
+        message,
+    ):
+        """Store the result of an individual gateway attempt."""
+
+        with self.session_factory.begin() as session:
+            attempt = PaymentAttemptRecord(
+                payment_id=payment_id,
+                gateway=gateway,
+                attempt_number=attempt_number,
+                status=status,
+                message=message,
+            )
+
+            session.add(attempt)
+
+    def get_attempts(self, payment_id):
+        """Retrieve all gateway attempts for a payment."""
+
+        statement = (
+            select(PaymentAttemptRecord)
+            .where(PaymentAttemptRecord.payment_id == payment_id)
+            .order_by(PaymentAttemptRecord.id)
+        )
+
+        with self.session_factory() as session:
+            return list(session.scalars(statement).all())
 
     def get_payment(self, payment_id):
         """Retrieve a payment using its ID."""
@@ -40,17 +88,21 @@ class PaymentRepository:
             return session.get(PaymentRecord, payment_id)
 
     def get_all_payments(self):
-        """Retrieve all payment records."""
+        """Retrieve all payments, newest first."""
+
+        statement = select(PaymentRecord).order_by(PaymentRecord.created_at.desc())
 
         with self.session_factory() as session:
-            return (
-                session.query(PaymentRecord)
-                .order_by(PaymentRecord.created_at.desc())
-                .all()
-            )
+            return list(session.scalars(statement).all())
 
-    def update_status(self, payment_id, status, message):
-        """Update the status and message of a payment."""
+    def update_status(
+        self,
+        payment_id,
+        status,
+        message,
+        gateway_name=None,
+    ):
+        """Update the status, message, and gateway of a payment."""
 
         with self.session_factory.begin() as session:
             record = session.get(PaymentRecord, payment_id)
@@ -60,5 +112,8 @@ class PaymentRepository:
 
             record.status = status
             record.message = message
+
+            if gateway_name is not None:
+                record.gateway = gateway_name
 
             return True

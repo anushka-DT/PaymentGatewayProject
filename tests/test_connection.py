@@ -1,5 +1,7 @@
+from sqlalchemy import select
+
 from payment_gateway.database.connection import create_database
-from payment_gateway.database.db_models import PaymentRecord
+from payment_gateway.database.db_models import Base, PaymentRecord
 
 
 def test_create_database():
@@ -8,8 +10,10 @@ def test_create_database():
     engine, session_factory = create_database("sqlite://")
 
     try:
+        Base.metadata.create_all(engine)
+
         with session_factory() as session:
-            payments = session.query(PaymentRecord).all()
+            payments = session.scalars(select(PaymentRecord)).all()
 
         assert payments == []
         assert engine is not None
@@ -26,10 +30,12 @@ def test_create_database_uses_environment_variable(monkeypatch):
     engine, session_factory = create_database()
 
     try:
+        Base.metadata.create_all(engine)
+
         assert engine is not None
 
         with session_factory() as session:
-            payments = session.query(PaymentRecord).all()
+            payments = session.scalars(select(PaymentRecord)).all()
 
         assert payments == []
 
