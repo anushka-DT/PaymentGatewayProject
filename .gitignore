@@ -22,3 +22,7 @@ htmlcov/
 
 # Local database
 payments.db
+*.db
+*.db-*
+*.db.backup
+
