@@ -1,0 +1,11 @@
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.5
+    hooks:
+      # Check and automatically fix lint issues
+      - id: ruff-check
+        args: [--fix]
+
+      # Format Python files
+      - id: ruff-format
