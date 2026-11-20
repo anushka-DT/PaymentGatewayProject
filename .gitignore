@@ -15,3 +15,14 @@ logs/
 # Testing and linting cache
 .pytest_cache/
 .ruff_cache/
+
+# Coverage data
+.coverage
+htmlcov/
+
+# Local database
+payments.db
+*.db
+*.db-*
+*.db.backup
+
